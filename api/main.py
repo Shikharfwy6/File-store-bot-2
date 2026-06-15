@@ -7,28 +7,32 @@ import re
 from datetime import datetime, time
 from http.server import BaseHTTPRequestHandler
 import aiohttp
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import MongoClient
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
 
-# --- CONFIGURATION (Vercel Environment Variables) ---
-BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
-DB_URI           = os.environ.get("DB_URI", "")
-CHANNEL_ID       = int(os.environ.get("CHANNEL_ID", "0"))
-START_IMAGE      = os.environ.get("START_IMAGE", "")
-LOG_GROUP_ID     = int(os.environ.get("LOG_GROUP_ID", "0"))
-ADMIN_USERNAME   = os.environ.get("ADMIN_USERNAME", "@admin")
-OWNER_ID         = int(os.environ.get("OWNER_ID", "0"))
+# --- CONFIG ---
+BOT_TOKEN         = os.environ.get("BOT_TOKEN", "")
+DB_URI            = os.environ.get("DB_URI", "")
+CHANNEL_ID        = int(os.environ.get("CHANNEL_ID", "0"))
+START_IMAGE       = os.environ.get("START_IMAGE", "")
+LOG_GROUP_ID      = int(os.environ.get("LOG_GROUP_ID", "0"))
+ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "@admin")
+OWNER_ID          = int(os.environ.get("OWNER_ID", "0"))
 ADMIN_EARNING_API = os.environ.get("ADMIN_EARNING_API", "")
 
-# --- DB ---
-db_client  = AsyncIOMotorClient(DB_URI)
-db         = db_client["FileStoreDB"]
-users_col  = db["users"]
-files_col  = db["files"]
+# --- SYNC DB (pymongo - Vercel safe) ---
+_mongo_client = None
+
+def get_cols():
+    global _mongo_client
+    if _mongo_client is None:
+        _mongo_client = MongoClient(DB_URI, serverSelectionTimeoutMS=5000)
+    db = _mongo_client["FileStoreDB"]
+    return db["users"], db["files"]
 
 user_states = {}
 
@@ -68,11 +72,11 @@ async def get_shortened_url(api_url, long_url):
 async def main_menu(update: Update, is_cb=False):
     text = "📂 **Main Menu**\n\nNiche diye buttons use karein:"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Your Links",          callback_data="your_links"),
-         InlineKeyboardButton("⚙️ Enter Shortener",     callback_data="enter_shortener")],
-        [InlineKeyboardButton("📁 Upload Single File",  callback_data="upload_single"),
-         InlineKeyboardButton("📦 Upload Bulk Files",   callback_data="upload_bulk")],
-        [InlineKeyboardButton("❌ Delete Account",       callback_data="delete_confirm")]
+        [InlineKeyboardButton("🔗 Your Links",         callback_data="your_links"),
+         InlineKeyboardButton("⚙️ Enter Shortener",    callback_data="enter_shortener")],
+        [InlineKeyboardButton("📁 Upload Single File", callback_data="upload_single"),
+         InlineKeyboardButton("📦 Upload Bulk Files",  callback_data="upload_bulk")],
+        [InlineKeyboardButton("❌ Delete Account",      callback_data="delete_confirm")]
     ])
     if is_cb:
         await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -82,18 +86,19 @@ async def main_menu(update: Update, is_cb=False):
 # ── HANDLERS ─────────────────────────────────────────────────────────────────
 
 async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
-    uname = ctx.bot.username
-    args = ctx.args or []
+    uid    = update.effective_user.id
+    uname  = ctx.bot.username
+    args   = ctx.args or []
+    users_col, files_col = get_cols()
 
     # Verification deep link
     if args and args[0].startswith("verify_"):
-        token    = args[0]
-        owner_doc = await users_col.find_one({"Users.verify_token": token})
+        token     = args[0]
+        owner_doc = users_col.find_one({"Users.verify_token": token})
         if not owner_doc:
             await update.message.reply_text("❌ Link invalid ya expire ho chuka hai.")
             return
-        await users_col.update_one(
+        users_col.update_one(
             {"user_id": owner_doc["user_id"], "Users.verify_token": token},
             {"$set": {"Users.$.status": "verified", "Users.$.expiretime": get_tonight_expiry()}}
         )
@@ -104,14 +109,14 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # File deep link
     if args:
         code      = args[0].strip()
-        file_data = await files_col.find_one({"code": code})
+        file_data = files_col.find_one({"code": code})
         if not file_data:
             await update.message.reply_text("❌ Link invalid ya file delete ho chuki hai.")
             return
 
         owner_id = file_data.get("owner_id")
         if owner_id and owner_id != uid:
-            owner = await users_col.find_one({"user_id": owner_id})
+            owner = users_col.find_one({"user_id": owner_id})
             if owner:
                 arr         = owner.get("Users", [])
                 target_user = next((u for u in arr if u["userid"] == uid), None)
@@ -124,12 +129,12 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         if exp and now < exp:
                             verified = True
                         else:
-                            await users_col.update_one(
+                            users_col.update_one(
                                 {"user_id": owner_id, "Users.userid": uid},
                                 {"$set": {"Users.$.status": "unverified", "Users.$.verify_token": None}}
                             )
                 else:
-                    await users_col.update_one(
+                    users_col.update_one(
                         {"user_id": owner_id},
                         {"$push": {"Users": {"userid": uid, "status": "unverified",
                                              "expiretime": None, "verify_token": None}}}
@@ -140,7 +145,7 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     vtoken   = f"verify_{generate_code().lower()}"
                     base_url = f"https://t.me/{uname}?start={vtoken}"
 
-                    await users_col.update_one(
+                    users_col.update_one(
                         {"user_id": owner_id, "Users.userid": uid},
                         {"$set": {"Users.$.verify_token": vtoken}}
                     )
@@ -183,7 +188,7 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # Normal /start
-    user = await users_col.find_one({"user_id": uid})
+    user = users_col.find_one({"user_id": uid})
     if not user:
         text = "👋 Welcome! Files store karne ke liye account banao."
         kb   = InlineKeyboardMarkup([[InlineKeyboardButton("📝 Create Account", callback_data="create_account")]])
@@ -209,10 +214,11 @@ async def admin_verify(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tid = int(ctx.args[0])
     except ValueError:
         return
-    if not await users_col.find_one({"user_id": tid}):
+    users_col, _ = get_cols()
+    if not users_col.find_one({"user_id": tid}):
         await update.message.reply_text("❌ User nahi mila.")
         return
-    await users_col.update_one({"user_id": tid}, {"$set": {"status": "verified"}})
+    users_col.update_one({"user_id": tid}, {"$set": {"status": "verified"}})
     await update.message.reply_text(f"✅ User `{tid}` verified!", parse_mode="Markdown")
 
 
@@ -221,16 +227,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     d   = q.data
     await q.answer()
+    users_col, _ = get_cols()
 
     if d == "create_account":
-        if not await users_col.find_one({"user_id": uid}):
-            await users_col.insert_one(
+        if not users_col.find_one({"user_id": uid}):
+            users_col.insert_one(
                 {"user_id": uid, "links": [], "shorteners": [], "status": "unverified", "Users": []})
             await q.message.reply_text("🎉 Account ban gaya!")
         await main_menu(update, is_cb=False)
 
     elif d == "your_links":
-        user = await users_col.find_one({"user_id": uid})
+        user = users_col.find_one({"user_id": uid})
         back = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="back_to_menu")]])
         if not user or not user.get("links"):
             await q.edit_message_text("⚠️ Koi link nahi abhi tak.", reply_markup=back)
@@ -267,7 +274,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
 
     elif d == "delete_account_final":
-        await users_col.delete_one({"user_id": uid})
+        users_col.delete_one({"user_id": uid})
         user_states.pop(uid, None)
         await q.edit_message_text("🗑️ Account delete ho gaya. Wapas: `/start`")
 
@@ -277,9 +284,10 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def end_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+    uid      = update.effective_user.id
     uname_tg = ctx.bot.username
-    user = await users_col.find_one({"user_id": uid})
+    users_col, files_col = get_cols()
+    user     = users_col.find_one({"user_id": uid})
 
     if user and user.get("status") == "unverified":
         tg_un = f"@{update.effective_user.username}" if update.effective_user.username else "No Username"
@@ -305,7 +313,7 @@ async def end_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             user_states.pop(uid, None)
             await main_menu(update)
             return
-        await users_col.update_one({"user_id": uid}, {"$set": {"shorteners": apis}})
+        users_col.update_one({"user_id": uid}, {"$set": {"shorteners": apis}})
         user_states.pop(uid, None)
         await update.message.reply_text(f"✅ **{len(apis)} API links save ho gaye!**", parse_mode="Markdown")
         await main_menu(update)
@@ -315,19 +323,19 @@ async def end_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not all_files:
             await update.message.reply_text("⚠️ Koi file nahi bheji.")
             return
-        chunks = [all_files[i:i+50] for i in range(0, len(all_files), 50)]
-        prev_code      = None
-        first_link     = ""
+        chunks     = [all_files[i:i+50] for i in range(0, len(all_files), 50)]
+        prev_code  = None
+        first_link = ""
         for idx, chunk in enumerate(reversed(chunks)):
             code = generate_code()
             doc  = {"code": code, "file_ids": chunk, "owner_id": uid}
             if prev_code:
                 doc["next_part"] = prev_code
-            await files_col.insert_one(doc)
+            files_col.insert_one(doc)
             prev_code = code
             if idx == len(chunks) - 1:
                 first_link = f"https://t.me/{uname_tg}?start={code}"
-        await users_col.update_one({"user_id": uid}, {"$push": {"links": first_link}})
+        users_col.update_one({"user_id": uid}, {"$push": {"links": first_link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
             f"✅ **Bulk Link Ready!**\n\n🔗 {first_link}",
@@ -350,9 +358,10 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
+    uid      = update.effective_user.id
     uname_tg = ctx.bot.username
-    user = await users_col.find_one({"user_id": uid})
+    users_col, files_col = get_cols()
+    user     = users_col.find_one({"user_id": uid})
     if not user:
         return
 
@@ -370,8 +379,8 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        fwd    = await update.message.forward(CHANNEL_ID)
-        fid    = fwd.message_id
+        fwd = await update.message.forward(CHANNEL_ID)
+        fid = fwd.message_id
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
         return
@@ -379,10 +388,10 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = user_states[uid]["state"]
 
     if state == "waiting_single":
-        code  = generate_code()
-        link  = f"https://t.me/{uname_tg}?start={code}"
-        await files_col.insert_one({"code": code, "file_ids": [fid], "owner_id": uid})
-        await users_col.update_one({"user_id": uid}, {"$push": {"links": link}})
+        code = generate_code()
+        link = f"https://t.me/{uname_tg}?start={code}"
+        files_col.insert_one({"code": code, "file_ids": [fid], "owner_id": uid})
+        users_col.update_one({"user_id": uid}, {"$push": {"links": link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
             f"✅ **Link Ready:**\n\n🔗 {link}",
@@ -414,23 +423,16 @@ def build_app() -> Application:
     return app
 
 
-# ── VERCEL WEBHOOK ENTRY POINT ────────────────────────────────────────────────
+# ── VERCEL ENTRY POINT ────────────────────────────────────────────────────────
 
-_app = None
+_app  = None
 _loop = None
 
-def get_or_create_loop():
+def get_loop():
     global _loop
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        _loop = loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        _loop = loop
+    if _loop is None or _loop.is_closed():
+        _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
     return _loop
 
 async def get_app():
@@ -446,22 +448,21 @@ class handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length).decode())
 
-            loop = get_or_create_loop()
+            loop = get_loop()
 
             async def process():
                 application = await get_app()
-                update = Update.de_json(body, application.bot)
-                await application.process_update(update)
+                upd = Update.de_json(body, application.bot)
+                await application.process_update(upd)
 
             loop.run_until_complete(process())
 
+        except Exception as e:
+            print(f"Webhook error: {e}")
+        finally:
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
-        except Exception as e:
-            print(f"Error: {e}")
-            self.send_response(200)  # Telegram ko 200 chahiye warna retry karega
-            self.end_headers()
 
     def do_GET(self):
         self.send_response(200)
