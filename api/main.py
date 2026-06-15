@@ -338,7 +338,7 @@ async def end_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users_col.update_one({"user_id": uid}, {"$push": {"links": first_link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
-            f"Link Ready:\n\n{link}",
+            f"Link Ready:\n\n{first_link}",
             disable_web_page_preview=True)
         await main_menu(update)
 
@@ -394,7 +394,7 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users_col.update_one({"user_id": uid}, {"$push": {"links": link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
-            f"Link Ready:\n\n{link}",
+            f"Link Ready:\n\n{first_link}",
             disable_web_page_preview=True)
         await main_menu(update)
 
