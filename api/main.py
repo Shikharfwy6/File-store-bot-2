@@ -338,8 +338,8 @@ async def end_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users_col.update_one({"user_id": uid}, {"$push": {"links": first_link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
-            f"✅ **Bulk Link Ready!**\n\n🔗 {first_link}",
-            parse_mode="Markdown", disable_web_page_preview=True)
+            f"Link Ready:\n\n{link}",
+            disable_web_page_preview=True)
         await main_menu(update)
 
 
@@ -394,14 +394,14 @@ async def file_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         users_col.update_one({"user_id": uid}, {"$push": {"links": link}})
         user_states.pop(uid, None)
         await update.message.reply_text(
-            f"✅ **Link Ready:**\n\n🔗 {link}",
-            parse_mode="Markdown", disable_web_page_preview=True)
+            f"Link Ready:\n\n{link}",
+            disable_web_page_preview=True)
         await main_menu(update)
 
     elif state == "waiting_bulk":
         user_states[uid]["bulk_files"].append(fid)
         n = len(user_states[uid]["bulk_files"])
-        await update.message.reply_text(f"📥 File received ({n}). `/end` se khatam karein.", parse_mode="Markdown")
+        await update.message.reply_text(f"File received ({n}). /end se khatam karein.")
 
 
 # ── APP BUILDER ───────────────────────────────────────────────────────────────
