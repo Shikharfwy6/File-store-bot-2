@@ -5,7 +5,6 @@ import string
 import asyncio
 import re
 from datetime import datetime, time
-from http.server import BaseHTTPRequestHandler
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,6 +12,7 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 
 # --- CONFIGURATION (Vercel Environment Variables) ---
 BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
@@ -48,7 +48,7 @@ async def get_shortened_url(api_url, long_url):
         sep   = "&" if "?" in clean else "?"
         call  = f"{clean}{sep}url={long_url}"
         async with aiohttp.ClientSession() as s:
-            async with s.get(call, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            async with s.get(call, timeout=aiohttp.ClientTimeout(total=5)) as r: # Timeout short kiya takki function crash na ho
                 if r.status == 200:
                     try:
                         j = await r.json(content_type=None)
@@ -86,7 +86,6 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uname = ctx.bot.username
     args = ctx.args or []
 
-    # Verification deep link
     if args and args[0].startswith("verify_"):
         token    = args[0]
         owner_doc = await users_col.find_one({"Users.verify_token": token})
@@ -101,7 +100,6 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "✅ **Verify ho gaye!**\nAb file link par dubara click karein.", parse_mode="Markdown")
         return
 
-    # File deep link
     if args:
         code      = args[0].strip()
         file_data = await files_col.find_one({"code": code})
@@ -162,7 +160,6 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     )
                     return
 
-        # Deliver files
         file_ids = file_data["file_ids"]
         await update.message.reply_text(f"📦 Files bhej raha hoon... ({len(file_ids)} files)")
         for fid in file_ids:
@@ -182,7 +179,6 @@ async def start_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Saari files deliver ho gayi!")
         return
 
-    # Normal /start
     user = await users_col.find_one({"user_id": uid})
     if not user:
         text = "👋 Welcome! Files store karne ke liye account banao."
@@ -414,38 +410,39 @@ def build_app() -> Application:
     return app
 
 
-# ── VERCEL WEBHOOK ENTRY POINT ────────────────────────────────────────────────
+# ── FASTAPI ENTRY POINT FOR VERCEL ───────────────────────────────────────────
 
-_app = None
+fastapi_app = FastAPI()
+_ptb_app = None
 
-async def get_app():
-    global _app
-    if _app is None:
-        _app = build_app()
-        await _app.initialize()
-    return _app
+async def init_bot():
+    global _ptb_app
+    if _ptb_app is None:
+        _ptb_app = build_app()
+        await _ptb_app.initialize()
+    return _ptb_app
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body   = json.loads(self.rfile.read(length).decode())
+async def process_telegram_update(body: dict):
+    """Background task jo requests handle karega, bina function timeout kiye"""
+    try:
+        bot_app = await init_bot()
+        update = Update.de_json(body, bot_app.bot)
+        await bot_app.process_update(update)
+    except Exception as e:
+        print(f"Error processing update: {e}")
 
-            async def process():
-                application = await get_app()
-                update = Update.de_json(body, application.bot)
-                await application.process_update(update)
+@fastapi_app.post("/")
+async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
+    try:
+        body = await request.json()
+        # Background task me dalne se Vercel instantly Telegram ko 'OK' bol dega, 
+        # jisse timeout (500 error) nahi aayega.
+        background_tasks.add_task(process_telegram_update, body)
+        return Response(content="OK", status_code=200)
+    except Exception as e:
+        print(f"Webhook Error: {e}")
+        return Response(content="Error", status_code=500)
 
-            asyncio.run(process())
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        except Exception as e:
-            print(f"Error: {e}")
-            self.send_response(500)
-            self.end_headers()
-
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is live!")
+@fastapi_app.get("/")
+async def root():
+    return {"status": "Bot is live!"}
