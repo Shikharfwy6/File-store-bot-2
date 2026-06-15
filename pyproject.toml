@@ -1,4 +1,10 @@
-python-telegram-bot==20.7
-motor==3.3.2
-aiohttp==3.9.1
-pymongo==4.6.1
+[project]
+name = "filestorebot"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot==20.7",
+    "pymongo==4.6.1",
+    "aiohttp==3.9.1",
+    "dnspython==2.6.1",
+]
