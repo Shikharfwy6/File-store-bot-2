@@ -417,6 +417,21 @@ def build_app() -> Application:
 # ── VERCEL WEBHOOK ENTRY POINT ────────────────────────────────────────────────
 
 _app = None
+_loop = None
+
+def get_or_create_loop():
+    global _loop
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        _loop = loop
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        _loop = loop
+    return _loop
 
 async def get_app():
     global _app
@@ -431,18 +446,21 @@ class handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body   = json.loads(self.rfile.read(length).decode())
 
+            loop = get_or_create_loop()
+
             async def process():
                 application = await get_app()
                 update = Update.de_json(body, application.bot)
                 await application.process_update(update)
 
-            asyncio.run(process())
+            loop.run_until_complete(process())
+
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
         except Exception as e:
             print(f"Error: {e}")
-            self.send_response(500)
+            self.send_response(200)  # Telegram ko 200 chahiye warna retry karega
             self.end_headers()
 
     def do_GET(self):
